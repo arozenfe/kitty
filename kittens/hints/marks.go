@@ -33,7 +33,7 @@ const (
 )
 
 func path_regex() string {
-	return fmt.Sprintf(`(?:\S*?/[\r\S]+)|(?:\S[\r\S]*%s)\b`, FILE_EXTENSION)
+	return fmt.Sprintf(`(?:\S*?/[^:\s]+)|(?:\S[^:\s]*%s)\b`, FILE_EXTENSION)
 }
 
 func default_linenum_regex() string {

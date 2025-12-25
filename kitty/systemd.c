@@ -26,6 +26,7 @@ static struct {
     void *lib;
     sd_bus *user_bus;
     bool initialized, functions_loaded, ok;
+    int version;  // systemd version number, 0 if unknown
 } systemd = {0};
 
 typedef struct {
@@ -46,6 +47,11 @@ FUNC(sd_bus_message_open_container, int, sd_bus_message *m, char type, const cha
 FUNC(sd_bus_message_close_container, int, sd_bus_message *m);
 FUNC(sd_pid_get_user_slice, int, pid_t pid, char **slice);
 FUNC(sd_bus_call, int, sd_bus *bus, sd_bus_message *m, uint64_t usec, sd_bus_error *ret_error, sd_bus_message **reply);
+FUNC(sd_bus_get_property_string, int, sd_bus *bus, const char *destination, const char *path, const char *interface, const char *member, sd_bus_error *ret_error, char **ret);
+
+#define SYSTEMD_DESTINATION "org.freedesktop.systemd1"
+#define SYSTEMD_PATH "/org/freedesktop/systemd1"
+#define SYSTEMD_INTERFACE "org.freedesktop.systemd1.Manager"
 
 static void
 ensure_initialized(void) {
@@ -81,10 +87,24 @@ ensure_initialized(void) {
     LOAD_FUNC(sd_bus_message_close_container);
     LOAD_FUNC(sd_pid_get_user_slice);
     LOAD_FUNC(sd_bus_call);
+    LOAD_FUNC(sd_bus_get_property_string);
     systemd.functions_loaded = true;
 
     int ret = sd_bus_default_user(&systemd.user_bus);
     if (ret < 0) { log_error("Failed to open systemd user bus with error: %s", strerror(-ret)); return; }
+    
+    // Detect systemd version
+    RAII_ALLOC(char, version_str, NULL);
+    sd_bus_error err = {0};
+    if (sd_bus_get_property_string(systemd.user_bus, SYSTEMD_DESTINATION, SYSTEMD_PATH, SYSTEMD_INTERFACE, "Version", &err, &version_str) >= 0 && version_str) {
+        // Version string format is like "systemd 253" or "253"
+        int version = 0;
+        if (sscanf(version_str, "systemd %d", &version) == 1 || sscanf(version_str, "%d", &version) == 1) {
+            systemd.version = version;
+        }
+    }
+    sd_bus_error_free(&err);
+    
     systemd.ok = true;
 }
 
@@ -92,10 +112,6 @@ static inline void err_cleanup(sd_bus_error *p) { sd_bus_error_free(p); }
 #define RAII_bus_error(name) __attribute__((cleanup(err_cleanup))) sd_bus_error name = {0};
 static inline void msg_cleanup(sd_bus_message **p) { sd_bus_message_unref(*p); }
 #define RAII_message(name) __attribute__((cleanup(msg_cleanup))) sd_bus_message *name = NULL;
-
-#define SYSTEMD_DESTINATION "org.freedesktop.systemd1"
-#define SYSTEMD_PATH "/org/freedesktop/systemd1"
-#define SYSTEMD_INTERFACE "org.freedesktop.systemd1.Manager"
 
 static bool
 set_systemd_error(int r, const char *msg) {
@@ -151,7 +167,10 @@ move_pid_into_new_scope(pid_t pid, const char* scope_name, const char *descripti
     // If something in this process group is OOMkilled dont kill the rest of
     // the process group. Since typically the shell is not causing the OOM
     // something being run inside it is.
-    checked_call(sd_bus_message_append, m, "(sv)", "OOMPolicy", "s", "continue");
+    // OOMPolicy for scopes is only supported in systemd >= 253
+    if (systemd.version >= 253) {
+        checked_call(sd_bus_message_append, m, "(sv)", "OOMPolicy", "s", "continue");
+    }
 
     // Make sure shells are terminated with SIGHUP not just SIGTERM
     checked_call(sd_bus_message_append, m, "(sv)", "SendSIGHUP", "b", true);
